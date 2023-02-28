@@ -2,7 +2,20 @@ use crate::{TerminalChannel, TerminalWriter, UpChannel};
 use core::fmt::{self, Write as _};
 use core::mem::MaybeUninit;
 use core::ptr;
-use core::sync::atomic::{AtomicPtr, Ordering};
+//use core::sync::atomic::{Ordering};
+//use core::cell::UnsafeCell; 
+
+struct AtomicPtr<CriticalSectionFunc>{
+    inner: core::cell::UnsafeCell<*mut CriticalSectionFunc>
+}
+impl<CriticalSectionFunc> AtomicPtr<CriticalSectionFunc>{
+    pub const fn new(v:*mut CriticalSectionFunc)->AtomicPtr<CriticalSectionFunc>{
+        Self { inner:core::cell::UnsafeCell::new(v) }
+    }
+}
+
+//i believe this is fine since we protect access via critical sections.
+unsafe impl<CriticalSectionFunc> Sync for AtomicPtr<CriticalSectionFunc>{}
 
 static CRITICAL_SECTION: AtomicPtr<CriticalSectionFunc> = AtomicPtr::new(core::ptr::null_mut());
 static mut PRINT_TERMINAL: MaybeUninit<TerminalChannel> = MaybeUninit::uninit();
@@ -56,7 +69,8 @@ pub unsafe fn set_print_channel_cs(channel: UpChannel, cs: &'static CriticalSect
         );
     });
 
-    CRITICAL_SECTION.store(cs as *const _ as *mut _, Ordering::SeqCst);
+    //CRITICAL_SECTION.store(cs as *const _ as *mut _, Ordering::SeqCst);
+    critical_section::with(|_| unsafe { *CRITICAL_SECTION.inner.get() = cs as *const _ as *mut _  });
 }
 
 /// Sets the channel to use for [`rprint`] and [`rprintln`].
@@ -83,7 +97,8 @@ pub mod print_impl {
     use super::*;
 
     fn with_writer<F: Fn(TerminalWriter) -> ()>(number: u8, f: F) {
-        let cs = CRITICAL_SECTION.load(Ordering::SeqCst);
+        //let cs = CRITICAL_SECTION.load(Ordering::SeqCst);
+        let cs = critical_section::with(|_|unsafe{*CRITICAL_SECTION.inner.get()});
 
         if !cs.is_null() {
             // If the critical section pointer has been set, PRINT_TERMINAL must also have been set.
