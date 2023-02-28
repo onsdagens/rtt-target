@@ -3,10 +3,11 @@
 //! accessed from the rtt_init! macro.
 
 use crate::ChannelMode;
+use critical_section;
 use core::cmp::min;
 use core::fmt;
 use core::ptr;
-use core::sync::atomic::{fence, AtomicUsize, Ordering::SeqCst};
+use core::sync::atomic::{fence, Ordering::SeqCst};
 
 // Note: this is zero-initialized in the initialization macro so all zeros must be a valid value
 #[repr(C)]
@@ -54,9 +55,9 @@ pub struct RttChannel {
     name: *const u8,
     buffer: *mut u8,
     size: usize,
-    write: AtomicUsize,
-    read: AtomicUsize,
-    flags: AtomicUsize,
+    write: core::cell::UnsafeCell<usize>,
+    read: core::cell::UnsafeCell<usize>,
+    flags: core::cell::UnsafeCell<usize>,
 }
 
 impl RttChannel {
@@ -79,7 +80,8 @@ impl RttChannel {
     }
 
     pub(crate) fn mode(&self) -> ChannelMode {
-        let mode = self.flags.load(SeqCst) & 3;
+        let mode = critical_section::with(|_| unsafe { *self.flags.get() });
+        
 
         if mode <= 2 {
             unsafe { core::mem::transmute(mode) }
@@ -89,8 +91,8 @@ impl RttChannel {
     }
 
     pub(crate) fn set_mode(&self, mode: ChannelMode) {
-        self.flags
-            .store((self.flags.load(SeqCst) & !3) | mode as usize, SeqCst);
+        critical_section::with(|_| unsafe { *self.flags.get() = (*self.flags.get()&!3)| mode as usize});
+        
     }
 
     // This method should only be called for down channels.
@@ -125,7 +127,7 @@ impl RttChannel {
             buf = &mut buf[count..];
         }
 
-        self.read.store(read, SeqCst);
+        critical_section::with(|_| unsafe { *self.read.get() = read });
 
         total
     }
@@ -150,15 +152,18 @@ impl RttChannel {
     }
 
     fn read_pointers(&self) -> (usize, usize) {
-        let write = self.write.load(SeqCst);
-        let read = self.read.load(SeqCst);
+        let write = critical_section::with(|_| unsafe { *self.write.get()});
+        //let write = self.write.load(SeqCst);
+        let read = critical_section::with(|_| unsafe {*self.read.get()});
+        //let read = self.read.load(SeqCst);
 
         if write >= self.size || read >= self.size {
             // Pointers have been corrupted. This doesn't happen in well-behaved programs, so
             // attempt to reset the buffer.
-
-            self.write.store(0, SeqCst);
-            self.read.store(0, SeqCst);
+            critical_section::with(|_| unsafe { *self.write.get() = 0 });
+            //self.write.store(0, SeqCst);
+            critical_section::with(|_| unsafe { *self.read.get() = 0 });
+            //self.read.store(0, SeqCst);
             return (0, 0);
         }
 
@@ -214,7 +219,8 @@ impl RttWriter<'_> {
 
                     ChannelMode::BlockIfFull => {
                         // Commit everything written so far and spin until more can be written
-                        self.chan.write.store(self.write, SeqCst);
+                        critical_section::with(|_| unsafe { *self.chan.write.get() = self.write });
+                        //self.chan.write.store(self.write, SeqCst);
                         continue;
                     }
                 }
@@ -268,7 +274,8 @@ impl RttWriter<'_> {
             WriteState::Finished => return,
             WriteState::Full | WriteState::Writable => {
                 // Commit the write pointer so the host can see the new data
-                self.chan.write.store(self.write, SeqCst);
+                critical_section::with(|_| unsafe { *self.chan.write.get() = self.write });
+                //self.chan.write.store(self.write, SeqCst);
                 self.state = WriteState::Finished;
             }
         }
